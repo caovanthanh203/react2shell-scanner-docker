@@ -82,7 +82,35 @@ def build_payload() -> tuple[str, str]:
     return body, content_type
 
 
-def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True) -> dict:
+def resolve_redirects(url: str, timeout: int, verify_ssl: bool, max_redirects: int = 10) -> str:
+    """Follow redirects using HEAD requests to find the final URL."""
+    current_url = url
+    for _ in range(max_redirects):
+        try:
+            response = requests.head(
+                current_url,
+                timeout=timeout,
+                verify=verify_ssl,
+                allow_redirects=False
+            )
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("Location")
+                if location:
+                    if location.startswith("/"):
+                        parsed = urlparse(current_url)
+                        current_url = f"{parsed.scheme}://{parsed.netloc}{location}"
+                    else:
+                        current_url = location
+                else:
+                    break
+            else:
+                break
+        except RequestException:
+            break
+    return current_url
+
+
+def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, follow_redirects: bool = True) -> dict:
     """
     Check if a host is vulnerable to CVE-2025-55182/CVE-2025-66478.
 
@@ -101,6 +129,7 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True) -
         "error": None,
         "request": None,
         "response": None,
+        "final_url": None,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
@@ -108,6 +137,17 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True) -
     if not host:
         result["error"] = "Invalid or empty host"
         return result
+
+    target_url = f"{host}/"
+
+    # Follow redirects to find final destination
+    if follow_redirects:
+        try:
+            target_url = resolve_redirects(target_url, timeout, verify_ssl)
+        except Exception:
+            pass  # Continue with original URL if redirect resolution fails
+
+    result["final_url"] = target_url
 
     body, content_type = build_payload()
 
@@ -120,8 +160,8 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True) -
         "X-Nextjs-Html-Request-Id": "SSTMXm7OJ_g0Ncx6jpQt9",
     }
 
-    parsed = urlparse(host)
-    request_str = f"POST / HTTP/1.1\r\n"
+    parsed = urlparse(target_url)
+    request_str = f"POST {parsed.path or '/'} HTTP/1.1\r\n"
     request_str += f"Host: {parsed.netloc}\r\n"
     for k, v in headers.items():
         request_str += f"{k}: {v}\r\n"
@@ -131,7 +171,7 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True) -
 
     try:
         response = requests.post(
-            f"{host}/",
+            target_url,
             headers=headers,
             data=body,
             timeout=timeout,
@@ -207,13 +247,19 @@ def save_results(results: list[dict], output_file: str, vulnerable_only: bool = 
 
 def print_result(result: dict, verbose: bool = False):
     host = result["host"]
+    final_url = result.get("final_url")
+    redirected = final_url and final_url != f"{normalize_host(host)}/"
 
     if result["vulnerable"] is True:
         status = colorize("[VULNERABLE]", Colors.RED + Colors.BOLD)
         print(f"{status} {colorize(host, Colors.WHITE)} - Status: {result['status_code']}")
+        if redirected:
+            print(f"  -> Redirected to: {final_url}")
     elif result["vulnerable"] is False:
         status = colorize("[NOT VULNERABLE]", Colors.GREEN)
         print(f"{status} {host} - Status: {result['status_code']}")
+        if redirected and verbose:
+            print(f"  -> Redirected to: {final_url}")
     else:
         status = colorize("[ERROR]", Colors.YELLOW)
         error_msg = result.get("error", "Unknown error")
