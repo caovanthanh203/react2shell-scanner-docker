@@ -133,9 +133,52 @@ def resolve_redirects(url: str, timeout: int, verify_ssl: bool, max_redirects: i
     return current_url
 
 
+def send_payload(target_url: str, headers: dict, body: str, timeout: int, verify_ssl: bool) -> tuple[requests.Response | None, str | None]:
+    """Send the exploit payload to a URL. Returns (response, error)."""
+    try:
+        response = requests.post(
+            target_url,
+            headers=headers,
+            data=body,
+            timeout=timeout,
+            verify=verify_ssl,
+            allow_redirects=False
+        )
+        return response, None
+    except requests.exceptions.SSLError as e:
+        return None, f"SSL Error: {str(e)}"
+    except requests.exceptions.ConnectionError as e:
+        return None, f"Connection Error: {str(e)}"
+    except requests.exceptions.Timeout:
+        return None, "Request timed out"
+    except RequestException as e:
+        return None, f"Request failed: {str(e)}"
+    except Exception as e:
+        return None, f"Unexpected error: {str(e)}"
+
+
+def is_vulnerable_response(response: requests.Response) -> bool:
+    """Check if a response indicates vulnerability."""
+    if response.status_code != 500 or 'E{"digest"' not in response.text:
+        return False
+
+    # Check for Vercel/Netlify mitigations (not valid findings)
+    server_header = response.headers.get("Server", "").lower()
+    has_netlify_vary = "Netlify-Vary" in response.headers
+    is_mitigated = (
+        has_netlify_vary
+        or server_header == "netlify"
+        or server_header == "vercel"
+    )
+
+    return not is_mitigated
+
+
 def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, follow_redirects: bool = True, custom_headers: dict[str, str] | None = None) -> dict:
     """
     Check if a host is vulnerable to CVE-2025-55182/CVE-2025-66478.
+
+    Tests root path first. If not vulnerable and redirects exist, tests redirect path.
 
     Returns a dict with:
         - host: the target host
@@ -161,16 +204,7 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, f
         result["error"] = "Invalid or empty host"
         return result
 
-    target_url = f"{host}/"
-
-    # Follow redirects to find final destination
-    if follow_redirects:
-        try:
-            target_url = resolve_redirects(target_url, timeout, verify_ssl)
-        except Exception:
-            pass  # Continue with original URL if redirect resolution fails
-
-    result["final_url"] = target_url
+    root_url = f"{host}/"
 
     body, content_type = build_payload()
 
@@ -187,62 +221,65 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, f
     if custom_headers:
         headers.update(custom_headers)
 
-    parsed = urlparse(target_url)
-    request_str = f"POST {parsed.path or '/'} HTTP/1.1\r\n"
-    request_str += f"Host: {parsed.netloc}\r\n"
-    for k, v in headers.items():
-        request_str += f"{k}: {v}\r\n"
-    request_str += f"Content-Length: {len(body)}\r\n\r\n"
-    request_str += body
-    result["request"] = request_str
+    def build_request_str(url: str) -> str:
+        parsed = urlparse(url)
+        req_str = f"POST {parsed.path or '/'} HTTP/1.1\r\n"
+        req_str += f"Host: {parsed.netloc}\r\n"
+        for k, v in headers.items():
+            req_str += f"{k}: {v}\r\n"
+        req_str += f"Content-Length: {len(body)}\r\n\r\n"
+        req_str += body
+        return req_str
 
-    try:
-        response = requests.post(
-            target_url,
-            headers=headers,
-            data=body,
-            timeout=timeout,
-            verify=verify_ssl,
-            allow_redirects=False
-        )
+    def build_response_str(resp: requests.Response) -> str:
+        resp_str = f"HTTP/1.1 {resp.status_code} {resp.reason}\r\n"
+        for k, v in resp.headers.items():
+            resp_str += f"{k}: {v}\r\n"
+        resp_str += f"\r\n{resp.text[:2000]}"
+        return resp_str
 
-        result["status_code"] = response.status_code
+    # First, test the root path
+    result["final_url"] = root_url
+    result["request"] = build_request_str(root_url)
 
-        response_str = f"HTTP/1.1 {response.status_code} {response.reason}\r\n"
-        for k, v in response.headers.items():
-            response_str += f"{k}: {v}\r\n"
-        response_str += f"\r\n{response.text[:2000]}"
-        result["response"] = response_str
+    response, error = send_payload(root_url, headers, body, timeout, verify_ssl)
 
-        # Check for Vercel/Netlify mitigations (not valid findings)
-        server_header = response.headers.get("Server", "").lower()
-        has_netlify_vary = "Netlify-Vary" in response.headers
-        is_mitigated = (
-            has_netlify_vary
-            or server_header == "netlify"
-            or server_header == "vercel"
-        )
+    if error:
+        result["error"] = error
+        return result
 
-        # Check vulnerability indicators:
-        # 1. Status code 500
-        # 2. Response contains 'E{"digest"'
-        # 3. Not hosted on Vercel/Netlify (they have custom mitigations)
-        if response.status_code == 500 and 'E{"digest"' in response.text and not is_mitigated:
-            result["vulnerable"] = True
-        else:
-            result["vulnerable"] = False
+    result["status_code"] = response.status_code
+    result["response"] = build_response_str(response)
 
-    except requests.exceptions.SSLError as e:
-        result["error"] = f"SSL Error: {str(e)}"
-    except requests.exceptions.ConnectionError as e:
-        result["error"] = f"Connection Error: {str(e)}"
-    except requests.exceptions.Timeout:
-        result["error"] = "Request timed out"
-    except RequestException as e:
-        result["error"] = f"Request failed: {str(e)}"
-    except Exception as e:
-        result["error"] = f"Unexpected error: {str(e)}"
+    if is_vulnerable_response(response):
+        result["vulnerable"] = True
+        return result
 
+    # Root not vulnerable - try redirect path if enabled
+    if follow_redirects:
+        try:
+            redirect_url = resolve_redirects(root_url, timeout, verify_ssl)
+            if redirect_url != root_url:
+                # Different path, test it
+                response, error = send_payload(redirect_url, headers, body, timeout, verify_ssl)
+
+                if error:
+                    # Keep root result but note the redirect failed
+                    result["vulnerable"] = False
+                    return result
+
+                result["final_url"] = redirect_url
+                result["request"] = build_request_str(redirect_url)
+                result["status_code"] = response.status_code
+                result["response"] = build_response_str(response)
+
+                if is_vulnerable_response(response):
+                    result["vulnerable"] = True
+                    return result
+        except Exception:
+            pass  # Continue with root result if redirect resolution fails
+
+    result["vulnerable"] = False
     return result
 
 

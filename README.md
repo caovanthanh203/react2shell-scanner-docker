@@ -8,6 +8,10 @@ For technical details on the vulnerability and detection methodology, see our bl
 
 The scanner sends a crafted multipart POST request that triggers a specific error condition in vulnerable versions of React Server Components. Vulnerable hosts return a 500 status code with `E{"digest"` in the response body. This check differentiates vulnerable hosts from those that are simply running RSC.
 
+The scanner tests the root path first. If not vulnerable, it follows same-host redirects (e.g., `/` to `/en/`) and tests the redirect destination. Cross-origin redirects are not followed.
+
+Hosts running on Vercel or Netlify are automatically filtered out as these platforms have deployed mitigations.
+
 ## Requirements
 
 - Python 3.9+
@@ -40,6 +44,12 @@ Scan with multiple threads and save results:
 python3 scanner.py -l hosts.txt -t 20 -o results.json
 ```
 
+Scan with custom headers:
+
+```
+python3 scanner.py -u https://example.com -H "Authorization: Bearer token" -H "Cookie: session=abc"
+```
+
 ## Options
 
 ```
@@ -50,6 +60,7 @@ python3 scanner.py -l hosts.txt -t 20 -o results.json
 -o, --output      Output file for results (JSON)
 --all-results     Save all results, not just vulnerable hosts
 -k, --insecure    Disable SSL certificate verification
+-H, --header      Custom header (can be used multiple times)
 -v, --verbose     Show response details for vulnerable hosts
 -q, --quiet       Only output vulnerable hosts
 --no-color        Disable colored output
