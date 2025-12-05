@@ -270,6 +270,7 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, f
         "request": None,
         "response": None,
         "final_url": None,
+        "tested_url": None,
         "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
     }
 
@@ -329,6 +330,7 @@ def check_vulnerability(host: str, timeout: int = 10, verify_ssl: bool = True, f
         test_url = f"{host}{path}"
         
         # First, test the path
+        result["tested_url"] = test_url
         result["final_url"] = test_url
         result["request"] = build_request_str(test_url)
 
@@ -444,7 +446,9 @@ def save_results(results: list[dict], output_file: str, vulnerable_only: bool = 
 def print_result(result: dict, verbose: bool = False):
     host = result["host"]
     final_url = result.get("final_url")
-    redirected = final_url and final_url != f"{normalize_host(host)}/"
+    tested_url = result.get("tested_url")
+    # A redirect occurred if final_url differs from the originally tested URL
+    redirected = final_url and tested_url and final_url != tested_url
 
     if result["vulnerable"] is True:
         status = colorize("[VULNERABLE]", Colors.RED + Colors.BOLD)
