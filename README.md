@@ -1,5 +1,10 @@
 # react2shell-scanner
 
+Image: 
+```
+caovanthanh203/react2shell-scanner:latest
+```
+
 Original git: https://github.com/assetnote/react2shell-scanner
 
 A command-line tool for detecting CVE-2025-55182 and CVE-2025-66478 in Next.js applications using React Server Components.
@@ -10,9 +15,33 @@ For technical details on the vulnerability and detection methodology, see our bl
 
 The easiest way to run the scanner is with a pre-built Docker image, which avoids the need to install Python or other dependencies.
 
+## Option 1: Run with docker-compose
+
+Create docker-compose.yml file
+
+```xml
+version: '3.8'
+
+services:
+  scanner:
+    build: .
+    image: caovanthanh203/react2shell-scanner:latest
+    volumes:
+      - .:/app
+```
+
 ```bash
 docker-compose run --rm scanner -u https://example.com
 ```
+
+## Option 2: Run quickly without docker-compose
+
+```bash
+docker run --rm -it -v "$(pwd):/app" caovanthanh203/react2shell-scanner:latest -u https://example.com
+
+```
+
+## Pull image for later
 
 ```bash
 #pull image
