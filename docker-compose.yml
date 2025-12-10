@@ -1,0 +1,8 @@
+version: '3.8'
+
+services:
+  scanner:
+    build: .
+    image: caovanthanh203/react2shell-scanner:latest
+    volumes:
+      - .:/app
